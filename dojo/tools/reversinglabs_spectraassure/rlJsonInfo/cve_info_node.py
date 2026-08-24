@@ -85,10 +85,22 @@ class CveInfoNode:
 
         return self.title
 
+    def append_summary(
+        self,
+        dd: list[str],
+        summary: str | None = None,
+    ) -> str:
+        if summary:
+            dd.append(f"summary: {summary}")
+        self.description = " ".join(dd)
+        return self.description
+
     def make_description_cin(
         self,
+        *,
         cve: str,
         purl: str,
+        summary: str | None = None,
     ) -> str:
         def bold(s: str) -> str:
             return f"**{s}**"
@@ -99,29 +111,26 @@ class CveInfoNode:
         def item(s: str) -> str:
             return f"* {s}"
 
+        logger.debug(f"YYY: {summary}")
+
+        dd: list[str] = []
         if self.component_type == "component":
+            dd = [
+                f"On {self.component_type}",
+                f"purl: {purl}",
+                f"version: {self.component_version}",
+                f"path: {self.component_file_path}",
+                f"(sha256: {self.component_file_sha256})",
+            ]
+        else:
+            purl = self.component_file_purl
+            if not purl:
+                purl = self.component_file_name + "@" + self.component_file_version
 
-            self.description = " ".join(
-                [
-                    f"On {self.component_type}",
-                    f"purl: {purl}",
-                    f"version: {self.component_version}",
-                    f"path: {self.component_file_path}",
-                    f"(sha256: {self.component_file_sha256})",
-                ],
-            )
-            return self.description
-
-        purl = self.component_file_purl
-        if not purl:
-            purl = self.component_file_name + "@" + self.component_file_version
-
-        self.description = " ".join(
-            [
+            dd = [
                 "On component",
                 f"purl: {purl}",
                 f"path: {self.component_file_path}",
                 f"(sha256: {self.component_file_sha256})",
-            ],
-        )
-        return self.description
+            ]
+        return self.append_summary(dd, summary)

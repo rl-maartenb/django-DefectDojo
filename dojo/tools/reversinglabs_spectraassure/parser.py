@@ -1,13 +1,26 @@
 # noqa: RUF100
+# FIX_START
+# REMOVE: any line after FIX_START and before FIX_END
+# REMOVE: will be rewritten when copy to the dev machine
+# REMOVE: commented lines will be uncommented
+# REMOVE: and uncommented lines will be commented
+# import hashlib
+# import logging
+# from typing import Any
+# SPACE
+# from dojo.models import Finding
+# from dojo.tools.reversinglabs_spectraassure.rlJsonInfo import RlJsonInfo
+# from dojo.tools.reversinglabs_spectraassure.rlJsonInfo.cve_info_node import CveInfoNode
 import hashlib
 import logging
 from typing import Any
 
-from dojo.location.feature import locations_enabled
-from dojo.models import Finding
-from dojo.tools.locations import LocationData
-from dojo.tools.reversinglabs_spectraassure.rlJsonInfo import RlJsonInfo
-from dojo.tools.reversinglabs_spectraassure.rlJsonInfo.cve_info_node import CveInfoNode
+from finding import Finding
+
+from .rlJsonInfo import RlJsonInfo
+from .rlJsonInfo.cve_info_node import CveInfoNode
+
+# FIX_END
 
 logger = logging.getLogger(__name__)
 
@@ -73,11 +86,6 @@ class ReversinglabsSpectraassureParser:
         finding.unsaved_vulnerability_ids = [cve]
         finding.unsaved_tags = node.tags
         finding.impact = node.impact
-
-        if locations_enabled() and node.component_purl:
-            finding.unsaved_locations.append(
-                LocationData.dependency(purl=node.component_purl),
-            )
 
         return finding
 
