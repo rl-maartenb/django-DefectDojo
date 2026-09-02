@@ -1,7 +1,10 @@
 ---
 title: "DefectDojo Pro Changelog"
-description: "DefectDojo Changelog"
+description: "DefectDojo Pro Changelog"
 exclude_search: true
+outputs:
+  - "html"
+  - "rss"
 aliases:
   - "/en/changelog/changelog/"
   - "/changelog/pro_changelog/"
@@ -9,14 +12,55 @@ aliases:
 
 Here are the release notes for **DefectDojo Pro (Cloud Version)**. These release notes are focused on UX, so will not include all code changes.
 
+You can subscribe to these release notes with the [RSS feed](/releases/pro/changelog/index.xml).
+
 For Open Source release notes, please see the [Releases page on GitHub](https://github.com/DefectDojo/django-DefectDojo/releases), or alternatively consult the Open Source [upgrade notes](/releases/os_upgrading/upgrading_guide/).
 
 ## August 2026: v3.2
 
 ### August 24, 2026: v3.2.300
 
+New features:
+* **(Custom Fields)** Added typed Custom Fields: define your own fields across seven datatypes and attach them to six entity types. Custom field values are tracked in the audit log, and Rules Engine 2.0 rules can read and write them.
+* **(Rules Engine 2.0)** Rules can now work with Assets end to end, and a new asset provenance widget on the asset page layout shows which rule produced an asset.
+* **(Asset Hierarchy)** Rebuilt the Asset Hierarchy page on the Rules Engine 2.0 editor shell.
+* **(Connectors)** The GitHub Advanced Security connector can now import repository issues as a fourth finding family, under the new **GitHub: Issues** scan type. Pre-existing mappings are backfilled with the new subtype automatically.
+* **(Connectors)** The OpenVAS / Greenbone connector now supports GMP over SSH as a transport.
+
 Enhancements:
+* **(Deduplication)** The deduplication identity ledger is now enabled by default.
+* **(Connectors)** The Action1 connector now consolidates findings per organization, with machines recorded as endpoints, and each connector tile now counts only actively syncing records as mapped and surfaces unmapped records directly on the tile.
+* **(Locations)** The component and code backfills now run in batches, and stale-run reaping was moved off the poll, making the data-migration suite faster and lighter.
+* **(Operations)** DefectDojo now reports when a Celery task is routed to a queue that no worker consumes.
+* **(Sensei)** The scan-and-fix release image is smaller, with scanner installs split into per-ecosystem layers.
+* **(MCP)** The Pro MCP server now reports its version (with commit hash) via a CLI option.
+* **(Compliance)** The POA&M scheduled completion date is now derived from the finding's SLA.
+* **(Reporting)** The Risk Acceptance name is now offered as a finding report column.
+* **(Jira)** The custom fields JSON limit was raised from 200 to 1000.
+
+### August 18, 2026: v3.2.201
+
+New features:
+* **(Page Layouts)** The Risk Acceptance view page now uses a customizable widget grid, like the other View pages.
+* **(Sensei)** Added Amazon Bedrock as an on-prem LLM connection.
 * **(Locations)** The data-migration suite on the Feature Flags page can now be cancelled while a backfill is running. Cancelling stops the run at the next batch boundary and keeps everything migrated so far, so re-running the item resumes and converges on the same result. A run whose worker is lost is now detected and marked failed on its own, so a stuck suite becomes runnable again instead of blocking every item.
+* **(Endpoints)** Endpoints are now deprecated in favour of Locations.
+* **(Menu)** Classic-menu users are now warned that Menu 2.0 becomes the standard in 3.3.0.
+
+Enhancements:
+* **(CSPM)** Cloud Security Posture Management is now gated on the Sensei license rather than a separate feature flag.
+* **(Sensei)** Scan-and-fix scanner parallelism is now configurable, via `--max-parallel` / `MAX_PARALLEL` (and `sensei.maxParallel` in Helm).
+
+Bug fixes:
+* **(Authorization)** Import and reimport preview targets are now scoped to the caller's permissions, POA&M item findings are validated against the record's own product, and questionnaire expiration and question-set editing are checked against the response route and the questionnaire change permission.
+* **(Risk Acceptance)** A companion-less risk acceptance is now counted correctly, as active and as non-global, when filtering.
+* **(Reporting)** Report graph blocks that no browser captured are now drawn instead of failing silently, and the BETA badge that Menu 2.0 re-added after GA is gone.
+* **(Licensing)** License enforcement no longer blocks authentication.
+* **(Connectors)** The Action1 connector derives severity from the CVSS score when no severity bucket is usable, and a chunked sync now records one Import History row per sync.
+* **(Locations)** The endpoints-to-locations backfill now reports distinct locations and per-endpoint failures.
+* **(Dedupe)** Finding post-processing now retries on a transient DB deadlock.
+* **(UI)** The Advisor now renders with PrimeVue, and PSIRT and Field Mappings are nested correctly in the legacy sidebar.
+* **(Threat Model)** The schema-repair loop no longer deletes the prompt it is repairing.
 
 ### August 17, 2026: v3.2.200
 
@@ -406,7 +450,7 @@ Additional features:
 ### Mar 5, 2026: v2.56.0
 
 * **(API)** Restricted Note Types are now accessible via the API.
-* **(Connectors)** Added **IriusRisk** connector: see [tools reference](/connectors/upstream/toolreference/) for configuration instructions.
+* **(Connectors)** Added **IriusRisk** connector: see [tools reference](/connectors/toolreference/upstream/) for configuration instructions.
 * **(SAML)** SAML settings now support optional group attributes, allowing configurations that don't provide group mappings to work without errors.
 * **(SMTP)** Fixed an issue where DefectDojo would attempt SMTP authentication even when no credentials were configured, which could cause email delivery failures.
 * **(Universal Parser)** The Universal Parser now falls back to `clevercsv` for non-standard or malformed CSV files, improving compatibility with edge-case scanner outputs.
@@ -772,7 +816,7 @@ Hotfix release - no significant feature changes.
 
 #### Apr 14, 2025: v2.45.1
 
-- **(Connectors)** Added a Connector for Wiz: see [tools reference](/connectors/upstream/toolreference/) for configuration instructions.
+- **(Connectors)** Added a Connector for Wiz: see [tools reference](/connectors/toolreference/upstream/) for configuration instructions.
 
 #### Apr 7, 2025: v2.45.0
 
