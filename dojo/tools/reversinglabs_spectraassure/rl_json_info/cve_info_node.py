@@ -36,7 +36,7 @@ class CveInfoNode:
         # self.scan_tool_version: str = ""
 
         self.cvss_version: int = 0
-        self.score: float = 0.0  # this is normally the v3 score, we have no v4 in the report yet
+        self.score: float | None = None  # this is normally the v3 score, we have no v4 in the report yet
         self.score_severity: str = "Info"  # score mapped to severity
 
         self.tags: list[str] = []
@@ -54,7 +54,7 @@ class CveInfoNode:
 
         tt: list[str] = [
             f"{cve}",
-            f"on {self.component_type}",
+            f"on {self.component_type}: ",
         ]
 
         purl = self.component_purl
@@ -66,15 +66,10 @@ class CveInfoNode:
         else:
             tt.extend(
                 [
-                    f"name: {self.component_name}",
-                    f"version: {self.component_version}",
+                    f"{self.component_name}",
+                    f"version {self.component_version}",
                 ],
             )
-
-        #        with_sha256: bool = False
-        #        if self.component_type == "component":
-        #            if with_sha256:
-        #                tt.append(f" (sha256: {self.component_file_sha256})")
 
         self.title = " ".join(tt)
         return self.title
@@ -87,14 +82,13 @@ class CveInfoNode:
         logger.debug("append_summary")
 
         if summary:
-            dd.insert(0, summary)
-        self.description = " ".join(dd)
+            dd.insert(0, f"*{summary}*\n")
+        self.description = "\n".join(dd)
         return self.description
 
     def make_description_cin(
         self,
         *,
-        cve: str,
         purl: str,
         summary: str | None = None,
     ) -> str:
@@ -102,22 +96,27 @@ class CveInfoNode:
 
         dd: list[str] = []
         if self.component_type == "component":
-            dd = [
-                f"On {self.component_type}",
-                f"purl: {purl}",
-                f"version: {self.component_version}",
-                f"path: {self.component_file_path}",
-                f"(sha256: {self.component_file_sha256})",
-            ]
+            dd.append(f"## For {self.component_type}\n")
+            if purl:
+                dd.append(f"**purl: {purl}**")
+            if self.component_version:
+                dd.append(f"- version {self.component_version}")
         else:
+            dd.append("## For component\n")
+
             purl = self.component_file_purl
             if not purl:
-                purl = self.component_file_name + "@" + self.component_file_version
+                purl = self.component_file_name
+                if self.component_file_version:
+                    purl += "@" + self.component_file_version
+            if purl:
+                dd.append(f"**purl: {purl}**")
 
-            dd = [
-                "On component",
-                f"purl: {purl}",
-                f"path: {self.component_file_path}",
-                f"(sha256: {self.component_file_sha256})",
-            ]
+        # common ----
+        if self.component_file_path:
+            dd.append(f"- path: {self.component_file_path}")
+        if self.component_file_sha256:
+            dd.append(f"- sha256: {self.component_file_sha256}")
+        dd.append("\n")
+
         return self.append_summary(dd, summary)

@@ -7,44 +7,48 @@ from typing import Any, ClassVar
 from packageurl import PackageURL
 
 from .cve_info_node import CveInfoNode
+from .rl_json_secrets import (
+    ComponentInfo,
+    SecretInfo,
+    SecretsExtractor,
+    SecretsTree,
+    ViolationInfo,
+)
 
 logger = logging.getLogger(__name__)
 
 
 class RlJsonInfo:
-
-    SCAN_TOOL_NAME: str = "ReversingLabs SpectraAssure"
-
     info: dict[str, Any]
 
     # we currently only use components, dependencies and vulnerabilities
     known_metadata_sub_keys: ClassVar[list[str]] = [
-        "assessments",
-        "components",  # we use this
-        "cryptography",
-        "dependencies",  # we use this
-        "indicators",
-        "licenses",
-        "ml_models",
-        "services",
+        # "assessments",
+        # "cryptography",
+        # "indicators",
+        # "licenses",
+        # "ml_models",
+        # "services",
+        "components",
+        "dependencies",
         "secrets",
         "violations",
-        "vulnerabilities",  # we use this
+        "vulnerabilities",
     ]
 
-    assessments: dict[str, Any]
+    # assessments: dict[str, Any]
+    # cryptography: dict[str, Any]
+    # indicators: dict[str, Any]
+    # licenses: dict[str, Any]
+    # ml_models: dict[str, Any]
+    # services: dict[str, Any]
+
     components: dict[str, Any]
-    cryptography: dict[str, Any]
     dependencies: dict[str, Any]
-    indicators: dict[str, Any]
-    licenses: dict[str, Any]
-    ml_models: dict[str, Any]
-    services: dict[str, Any]
     secrets: dict[str, Any]
     violations: dict[str, Any]
     vulnerabilities: dict[str, Any]
-
-    _rest: dict[str, Any]  # after extracting and removing known sub key data, what remains goes here
+    scan_date: datetime.date
 
     severity_map: ClassVar[dict[int, str]] = {
         1: "Info",
@@ -92,10 +96,14 @@ class RlJsonInfo:
         self.info = {}
 
         self.data: dict[str, Any] = json.load(file_handle)
+        k = "timestamp"
+        if k in self.data:
+            self.scan_date = datetime.datetime.fromisoformat(self.data[k]).date()
+
         self._results = {}
         self._get_info()
         self._get_meta()
-        self._get_rest()
+        self.data = {}
 
     def _get_info(
         self,
@@ -104,7 +112,7 @@ class RlJsonInfo:
         report = self.data.get("report", {})
         key = "info"
         if key in report:
-            self.info = report.get(key, {})
+            self.info = report.get(key, None) or {}
             del report[key]
 
     def _get_meta(
@@ -112,24 +120,23 @@ class RlJsonInfo:
     ) -> None:
         logger.debug("_get_meta")
 
-        report = self.data.get("report", {})
-        metadata = report.get("metadata", {})
+        # ----------------------
+        k1 = "report"
+        if k1 not in self.data:
+            msg = f"Missing '{k1}' key in the json data, this is not a 'report.rl.json' type file"
+            raise ValueError(msg)
+        report = self.data.get("report", None) or {}
+
+        # ----------------------
+        k2 = "metadata"
+        if k2 not in report:
+            msg = f"Missing '{k1}.{k2}' key in the json data, this is not a 'report.rl.json' type file"
+            raise ValueError(msg)
+        metadata = report.get("metadata", None) or {}
+
+        # ----------------------
         for name in self.known_metadata_sub_keys:
-            setattr(self, name, metadata.pop(name, {}))
-
-        if len(metadata) == 0:
-            del report["metadata"]
-
-        if len(report) == 0:
-            del self.data["report"]
-
-    def _get_rest(
-        self,
-    ) -> None:
-        logger.debug("_get_rest")
-
-        self._rest = self.data
-        self.data = {}
+            setattr(self, name, metadata.pop(name, None) or {})
 
     def _find_sha256_in_components(
         self,
@@ -174,38 +181,56 @@ class RlJsonInfo:
         self,
         data: dict[str, Any],
         what: str = "sha256",
-    ) -> str:
+    ) -> str | None:
         logger.debug("_get_%s", what)
 
         # all components are derived from unpacked files and so have a hash set: we need the sha256
-        h = data.get("hashes", [])
+        h = data.get("hashes") or []
         for item in h:
-            if isinstance(h, list) and len(item) >= 2:
+            if isinstance(item, list) and len(item) >= 2:
                 if item[0] == what:
                     return str(item[1])
-
-        msg = f"no '{what}' found for this item {data}"
-        raise ValueError(msg) from None
+        return None
 
     def _score_to_severity(
         self,
+        *,
         score: float,
+        version: int = 3,
     ) -> str:
         logger.debug("_score_to_severity")
 
+        # version 3.x and 4.0 map the same
+        # version 2 has no Critical and maps 0 to Low
+
+        if version == 2:
+            if score >= 7:
+                return self.severity_map[4]
+            if score >= 4:
+                return self.severity_map[3]
+            if score >= 0:
+                return self.severity_map[2]
+
         if score >= 9:
             return self.severity_map[5]
-
         if score >= 7:
             return self.severity_map[4]
-
         if score >= 4:
             return self.severity_map[3]
-
         if score > 0:
             return self.severity_map[2]
-
         return self.severity_map[1]
+
+    def _do_purl(self, purl: str | None) -> str | None:
+        if purl:
+            try:
+                p = PackageURL.from_string(purl)
+            except ValueError:
+                logger.warning("unparsable purl, ignoring: %r", purl)
+            else:
+                return f"{p.namespace}/{p.name}" if p.namespace else p.name
+
+        return None
 
     def _use_path_or_name(
         self,
@@ -223,29 +248,28 @@ class RlJsonInfo:
         # if we have a valid purl
         #   prefer to derive the name from the purl
 
-        path = data.get("path", "")
-        name = data.get("name", "")
-
+        name = data.get("name") or ""
         if name_first and len(name) > 0:
             return str(name)
 
+        path = data.get("path") or ""
         if prefer_path and len(path) > 0:
             return str(path)
 
-        if purl:
-            p = PackageURL.from_string(purl)
-            return f"{p.namespace}/{p.name}" if p.namespace else p.name
+        s = self._do_purl(purl)
+        if s:
+            return s
 
-        if name_first is False:
-            if path:
-                return str(path)
+        if name_first:
             if name:
                 return str(name)
+            if path:
+                return str(path)
         else:
-            if name:
-                return str(name)
             if path:
                 return str(path)
+            if name:
+                return str(name)
 
         return ""
 
@@ -253,7 +277,7 @@ class RlJsonInfo:
         logger.debug("_get_tags_from_cve")
 
         tags: list[str] = []
-        exploit = this_cve.get("exploit", [])
+        exploit = this_cve.get("exploit") or []
         if len(exploit) == 0:
             return tags  # we have no exploit info so no tags
 
@@ -309,26 +333,37 @@ class RlJsonInfo:
         cve_info_node_instance.dep_uuid = dep_uuid
         cve_info_node_instance.active = bool(active)
 
-        f_info: dict[str, Any] = self.info.get("file", {})
-        # cve_info_node_instance.original_file = str(f_info.get("name", ""))
-        cve_info_node_instance.original_file_sha256 = self._get_sha256(f_info)
+        f_info: dict[str, Any] = self.info.get("file", None) or {}
 
-        cve_info_node_instance.scan_date = datetime.datetime.fromisoformat(self._rest["timestamp"]).date()
-        # cve_info_node_instance.scan_tool = self.SCAN_TOOL_NAME
-        # cve_info_node_instance.scan_tool_version = self._rest.get("version", "no_scan_tool_version_specified")
+        original_file = str(f_info.get("name", ""))
+        file_sha256 = self._get_sha256(f_info)
+        if not file_sha256:
+            msg = f"missing sha256 for file: '{original_file}'"
+            raise ValueError(msg)
+
+        # cve_info_node_instance.original_file_sha256 = file_sha256
+        cve_info_node_instance.scan_date = self.scan_date
 
         # score related
-        cve_info_node_instance.cvss_version = int(this_cve.get("cvss", {}).get("version") or 0)
+        # the version field in the cve dict is int normally
+        # lets downscale to int on all cases, we only use v3 and v4 data.
+        cvss = this_cve.get("cvss", None) or {}
+        cvss_version = cvss.get("version") or 0.0
+        cve_info_node_instance.cvss_version = int(float(cvss_version))
+        score: float = float(cvss.get("baseScore") or 0.0)
 
-        score: float = float(this_cve.get("cvss", {}).get("baseScore") or 0.0)
         cve_info_node_instance.score = score
-        cve_info_node_instance.score_severity = self._score_to_severity(score=score)
+        cve_info_node_instance.score_severity = self._score_to_severity(
+            score=score,
+            version=cve_info_node_instance.cvss_version,
+        )
 
         cve_info_node_instance.tags = self._get_tags_from_cve(this_cve)
         cve_info_node_instance.impact = self._make_impact_from_tags(
             cve_info_node_instance.tags,
             cve_info_node_instance.impact,
         )
+
         if "Patching Mandated" in cve_info_node_instance.tags:
             cve_info_node_instance.known_exploited = True
 
@@ -339,8 +374,8 @@ class RlJsonInfo:
         component: dict[str, Any],
     ) -> str:
         logger.debug("_get_component_purl")
-
-        return str(component.get("identity", {}).get("purl", ""))
+        ii = component.get("identity") or {}
+        return str(ii.get("purl", ""))
 
     def _get_dependency_purl(
         self,
@@ -352,6 +387,7 @@ class RlJsonInfo:
 
     def _do_one_cve_component_without_dependencies(
         self,
+        *,
         comp_uuid: str,
         component: dict[str, Any],
         cve: str,
@@ -370,23 +406,26 @@ class RlJsonInfo:
         if cve_info_node_instance is None:
             return None
 
-        identity = component.get("identity", {})
+        identity = component.get("identity") or {}
         version = identity.get("version", "")
-
+        name = component.get("name", "")
         c_purl = self._get_component_purl(component=component)
         summary: str | None = this_cve.get("summary") if this_cve else None
 
         cve_info_node_instance.component_file_path = self._use_path_or_name(data=component, purl=c_purl)
-        cve_info_node_instance.component_file_sha256 = self._get_sha256(data=component)
+        comp_sha256 = self._get_sha256(data=component)
+        if comp_sha256:
+            cve_info_node_instance.component_file_sha256 = comp_sha256
+
         cve_info_node_instance.component_file_purl = c_purl
         cve_info_node_instance.component_file_version = version
-        cve_info_node_instance.component_file_name = component.get("name", "")
+        cve_info_node_instance.component_file_name = name
         cve_info_node_instance.component_type = "component"
         cve_info_node_instance.component_name = self._use_path_or_name(data=component, purl=c_purl, name_first=True)
         cve_info_node_instance.component_version = version
         cve_info_node_instance.component_purl = c_purl
         cve_info_node_instance.make_title_cin(cve=cve)
-        cve_info_node_instance.make_description_cin(cve=cve, purl=c_purl, summary=summary)
+        cve_info_node_instance.make_description_cin(purl=c_purl, summary=summary)
         cve_info_node_instance.vuln_id_from_tool = cve
 
         logger.debug("%s", cve_info_node_instance)
@@ -401,7 +440,8 @@ class RlJsonInfo:
         logger.debug("_get_all_active_cve_on_components_without_dependencies")
 
         for comp_uuid, component in self.components.items():
-            v = component.get("identity", {}).get("vulnerabilities", None)
+            i_ = component.get("identity", None) or {}
+            v = i_.get("vulnerabilities", None)
             if v is None:
                 logger.info("no vulnerabilities for component: %s", comp_uuid)
                 continue
@@ -424,6 +464,7 @@ class RlJsonInfo:
     # component -> dependency -> cve
     def _do_one_cve_component_dependency(
         self,
+        *,
         comp_uuid: str,
         component: dict[str, Any],
         dep_uuid: str,
@@ -445,15 +486,20 @@ class RlJsonInfo:
         if cve_info_node_instance is None:
             return None
 
-        ident = component.get("identity", {})
+        identity = component.get("identity") or {}
+        version = identity.get("version", "")
+        name = component.get("name", "")
         c_purl = self._get_component_purl(component=component)
         summary: str | None = this_cve.get("summary") if this_cve else None
 
         cve_info_node_instance.component_file_path = self._use_path_or_name(data=component, purl=c_purl)
-        cve_info_node_instance.component_file_sha256 = self._get_sha256(data=component)
+        comp_sha256 = self._get_sha256(data=component)
+        if comp_sha256:
+            cve_info_node_instance.component_file_sha256 = comp_sha256
+
         cve_info_node_instance.component_file_purl = c_purl
-        cve_info_node_instance.component_file_version = ident.get("version", "")
-        cve_info_node_instance.component_file_name = component.get("name", "")
+        cve_info_node_instance.component_file_version = version
+        cve_info_node_instance.component_file_name = name
         cve_info_node_instance.component_type = "dependency"
         cve_info_node_instance.component_name = dependency.get(
             "product",
@@ -467,7 +513,7 @@ class RlJsonInfo:
         d_purl = self._get_dependency_purl(dependency=dependency)
         cve_info_node_instance.component_purl = d_purl
         cve_info_node_instance.make_title_cin(cve=cve)
-        cve_info_node_instance.make_description_cin(cve=cve, purl=d_purl, summary=summary)
+        cve_info_node_instance.make_description_cin(purl=d_purl, summary=summary)
         cve_info_node_instance.vuln_id_from_tool = cve
 
         # dep_purl = dependency.get("purl", "")
@@ -483,6 +529,7 @@ class RlJsonInfo:
 
     def _get_one_active_cve_component_dependency(
         self,
+        *,
         comp_uuid: str,
         component: dict[str, Any],
         dep_uuid: str,
@@ -529,7 +576,8 @@ class RlJsonInfo:
         # the component part
 
         for comp_uuid, component in self.components.items():
-            d = component.get("identity", {}).get("dependencies", None)
+            i_ = component.get("identity", None) or {}
+            d = i_.get("dependencies", None)
             if d is None:
                 logger.info("no dependencies for component: %s", comp_uuid)
                 continue
@@ -542,22 +590,6 @@ class RlJsonInfo:
                     dep_uuid=dep_uuid,
                 )
 
-    def _verify_file_is_also_component(
-        self,
-    ) -> bool:
-        logger.debug("_verify_file_is_also_component")
-
-        # the file mentioned in the info part of the report must also be a component.
-        f_info: dict[str, Any] = self.info.get("file", {})
-        file_sha256 = self._get_sha256(f_info)
-
-        file_is_component = self._find_sha256_in_components(file_sha256)
-        if file_is_component is False:
-            msg = f"file cannot be found as component: {f_info}"
-            raise ValueError(msg)
-
-        return file_is_component
-
     def _find_severity_string(self, severity: str) -> str:
         logger.debug("_find_severity_string")
 
@@ -567,22 +599,14 @@ class RlJsonInfo:
         logger.warning("unmapped violation severity %r, defaulting to Info", severity)
         return self.severity_map[1]  # "Info"
 
-    def _find_score_from_severity(self, severity: str) -> int:
-        logger.debug("_find_score_from_severity")
-
-        for k, v in self.severity_map.items():
-            if severity.lower() == v.lower():
-                return k
-        return 0
-
     def _filter_violations_failed_of_category(
         self,
         category: str,
-    ) -> list[dict[str, Any]]:
+    ) -> dict[str, dict[str, Any]]:
         logger.debug("_filter_violations_failed_of_category")
 
-        ll: list[dict[str, Any]] = []
-        for viol in self.violations.values():
+        dd: dict[str, dict[str, Any]] = {}
+        for k, viol in self.violations.items():
             # filter for relevant
             s = viol.get("status", "")
             if s != "fail":
@@ -594,7 +618,9 @@ class RlJsonInfo:
 
             logger.debug("violation: %s", viol)
 
-            for comp_uuid in viol.get("references", {}).get("component", []):
+            r_ = viol.get("references", None) or {}
+            c_ = r_.get("component", None) or []
+            for comp_uuid in c_:
                 logger.debug("component_uuid: %s", comp_uuid)
                 comp = self.components.get(comp_uuid)
                 if not comp:
@@ -611,15 +637,15 @@ class RlJsonInfo:
                 rr["rule_id"] = viol.get("rule_id")
                 rr["description"] = viol.get("description")
                 rr["score_severity"] = self._find_severity_string(viol.get("severity", ""))
-                rr["score"] = None  # self._find_score_from_severity(rr["score_severity"])
+                rr["score"] = None
                 rr["comp_uuid"] = comp_uuid
                 rr["comp_class_result"] = comp.get("classification", {}).get("result")
                 rr["comp_sha256"] = self._get_sha256(comp)
                 rr["name"] = comp.get("name")
                 rr["name_or_path"] = self._use_path_or_name(data=comp)
 
-                ll.append(rr)
-        return ll
+                dd[f"{k};{comp_uuid}"] = rr
+        return dd
 
     def _make_simple_title(
         self,
@@ -634,14 +660,11 @@ class RlJsonInfo:
         ]
         return " ".join(rr)
 
-    def _make_simple_description(
-        self,
-        data: dict[str, Any],
-    ) -> str:
+    def _make_simple_description(self, data: dict[str, Any], category: str | None = None) -> str:
         logger.debug("_make_simple_description")
 
         rr: list[str] = []  # title will be added to the description on dojo insert by the partser module
-        if data["comp_class_result"]:
+        if data["comp_class_result"] and category == "threats":
             rr.append(f"Threat name: {data['comp_class_result']}")
         return " ".join(rr)
 
@@ -655,41 +678,114 @@ class RlJsonInfo:
         cve_info_node_instance.active = True
 
         my_id = f"{data['category']}-{data['rule_id']}"
-
         f_info: dict[str, Any] = self.info.get("file", {})
+        original_file = str(f_info.get("name", ""))
 
-        # cve_info_node_instance.original_file = str(f_info.get("name", ""))
-        cve_info_node_instance.original_file_sha256 = self._get_sha256(f_info)
+        file_sha256 = self._get_sha256(f_info)
+        if not file_sha256:  # we must have a file sha, refuse to continue
+            msg = f"Missing sha256 for the file: {original_file}"
+            raise ValueError(msg)
 
-        cve_info_node_instance.scan_date = datetime.datetime.fromisoformat(self._rest["timestamp"]).date()
-        # cve_info_node_instance.scan_tool = self.SCAN_TOOL_NAME
-        # cve_info_node_instance.scan_tool_version = self._rest.get("version", "no_scan_tool_version_specified")
+        cve_info_node_instance.scan_date = self.scan_date
 
         cve_info_node_instance.component_file_path = data["name_or_path"]
-        cve_info_node_instance.component_file_sha256 = data["comp_sha256"]
+        if data["comp_sha256"]:
+            cve_info_node_instance.component_file_sha256 = data["comp_sha256"]
+
         cve_info_node_instance.component_file_name = data["name"]
         cve_info_node_instance.component_type = "component"
         cve_info_node_instance.component_name = data["name"]
         cve_info_node_instance.vuln_id_from_tool = my_id
-        # cve_info_node_instance.cve = f"{data['category']}-{data['rule_id']}"
 
         cve_info_node_instance.title = self._make_simple_title(data)
         cve_info_node_instance.description = self._make_simple_description(data)
+
         cve_info_node_instance.score = data["score"]
         cve_info_node_instance.score_severity = data["score_severity"]
 
         return cve_info_node_instance
 
-    def _collect_violations_by_category(self, category: str) -> None:
-        logger.debug("_collect_violations_by_category")
+    def _render_secrets_as_text(
+        self,
+        secrets: dict[str, SecretInfo],
+    ) -> str:
+        lines: list[str] = []
+        for item in secrets.values():
+            timestamp = item["timestamp"]
+            service = item["service"]
+            exposed = item["exposed"]
+            line = f"service: {service}, timestamp: {timestamp}, exposed: {exposed}"
+            lines.append(line)
 
-        result_list = self._filter_violations_failed_of_category(category)
-        for item in result_list:
-            logger.debug("violations_by_category: %s: %s", category, item)
+            for ev in item["evidence"]:
+                canary = ev["canary"]
+                liveness = ev["liveness"]
+                file_offset = ev["file_offset"]
+                line_number = ev["line_number"]
+                line = f"liveness: {liveness}"
+                if file_offset:
+                    line += f", file_offset: {file_offset}"
+                if line_number:
+                    line += f", line_number: {line_number}"
+                if canary:
+                    line += f", canary: {canary}"
+                lines.append(line)
+
+        return "\n".join(lines)
+
+        # return json.dumps(secrets, indent=4)
+
+    def _collect_violations_by_category_secrets(self) -> None:
+        logger.debug("_collect_violations_by_category_secrets")
+        category = "secrets"
+
+        se = SecretsExtractor(
+            components=self.components,
+            secrets=self.secrets,
+            violations=self.violations,
+        )
+        st: SecretsTree = se.extract()
+
+        result_dict = self._filter_violations_failed_of_category(category)
+        for k, item in result_dict.items():
+            logger.debug("violations_by_category: %s %s: %s", category, k, item)
+            viol_uuid, comp_uuid = k.split(";")
+            secret_as_text = ""
+            vi: ViolationInfo | None = st["violations"].get(viol_uuid)
+            if vi:
+                ci: ComponentInfo | None = vi["components"].get(comp_uuid)
+                if ci:
+                    si = ci["secrets"]
+                    secret_as_text = self._render_secrets_as_text(si)
 
             cve_info_node_instance = self._make_simple_node(item)
+            cve_info_node_instance.description = self._make_simple_description(
+                item, category,
+            )  # now add the secrets info
+            if len(secret_as_text):
+                cve_info_node_instance.description += f"\n```\n{secret_as_text}\n```"
+
             self._add_to_results(
-                cve=None,  # cve_info_node_instance.cve,
+                cve=cve_info_node_instance.vuln_id_from_tool,
+                comp_uuid=item["comp_uuid"],
+                dep_uuid=None,
+                cve_info_node_instance=cve_info_node_instance,
+            )
+
+    def _collect_violations_by_category_threats(self) -> None:
+        logger.debug("_collect_violations_by_category_threats")
+
+        category = "threats"
+        result_dict = self._filter_violations_failed_of_category(category)
+        for item in result_dict.values():
+            logger.debug("violations_by_category: %s %s", category, item)
+            cve_info_node_instance = self._make_simple_node(item)
+            cve_info_node_instance.description = self._make_simple_description(
+                item, category,
+            )  # now add the secrets info
+
+            self._add_to_results(
+                cve=cve_info_node_instance.vuln_id_from_tool,
                 comp_uuid=item["comp_uuid"],
                 dep_uuid=None,
                 cve_info_node_instance=cve_info_node_instance,
@@ -704,7 +800,7 @@ class RlJsonInfo:
         """
         logger.debug("_get_cve_active_all")
 
-        self.file_is_component = self._verify_file_is_also_component()
+        # self.file_is_component = self._verify_file_is_also_component()
         self._get_all_active_cve_on_components_without_dependencies()
         self._get_all_active_cve_on_components_with_dependencies()
 
@@ -727,5 +823,5 @@ class RlJsonInfo:
     def build_findings(self) -> None:
         logger.debug("build_findings")
         self._get_cve_active_all()
-        self._collect_violations_by_category("threats")
-        self._collect_violations_by_category("secrets")
+        self._collect_violations_by_category_threats()
+        self._collect_violations_by_category_secrets()

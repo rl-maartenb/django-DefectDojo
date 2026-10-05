@@ -19,14 +19,15 @@ HxDSetup_2.5.0.exe: has multiple components with the same name but different sha
 _WHERE = "reversinglabs_spectraassure"
 
 _FILES = [
-    "FD13-FullUSB.zip-report.rl.json",  # No Vulnerabilities
+    "FD13-FullUSB.zip-report.rl.json",  # One secret , no CVE
     "putty_win_x64-0.80.exe-report.rl.json",  # One vulnerability
-    "HxDSetup_2.5.0.exe-report.rl.json",  # Multiple with identical component name but different sha256
+    "HxDSetup_2.5.0.exe-report.rl.json",  # Multiple (12) with identical component name but different sha256
 ]
 
 
 # mypy gives:  error: Class cannot subclass "DojoTestCase" (has type "Any")  [misc]
 class TestReversingLabsSpectraAssureParser(DojoTestCase):  # type: ignore[misc]
+
     def common_checks(self, finding: Finding) -> None:
         self.assertLessEqual(len(finding.title), 250)
         self.assertIn(finding.severity, Finding.SEVERITIES)
@@ -36,40 +37,43 @@ class TestReversingLabsSpectraAssureParser(DojoTestCase):  # type: ignore[misc]
         self.assertEqual(False, finding.dynamic_finding)  # by specification
 
     def test_parse_file_with_no_vuln(self) -> None:
+        # no CVE but one secret violation
         with (get_unit_tests_scans_path(_WHERE) / "FD13-FullUSB.zip-report.rl.json").open(encoding="utf-8") as testfile:
             parser = ReversinglabsSpectraassureParser()
-            findings = parser.get_findings(
-                testfile,
-                Test(),
-            )
-            self.assertEqual(0, len(findings))
-            for finding in findings:
-                self.common_checks(finding)
-                self.assertEqual(1, len(finding.unsaved_vulnerability_ids))
+            findings = parser.get_findings(testfile, Test())
+
+            cves = [f for f in findings if f.unsaved_vulnerability_ids]
+            for f in cves:
+                self.assertEqual(1, len(f.unsaved_vulnerability_ids))
+                self.assertTrue(
+                    f.unsaved_vulnerability_ids[0].startswith("CVE-")
+                    or f.unsaved_vulnerability_ids[0].startswith("GHSE-"),
+                )
+
+            viols = [f for f in findings if not f.unsaved_vulnerability_ids]
+            for f in viols:
+                self.assertTrue(f.vuln_id_from_tool)
 
     def test_parse_file_with_one_vuln(self) -> None:
         with (get_unit_tests_scans_path(_WHERE) / "putty_win_x64-0.80.exe-report.rl.json").open(
             encoding="utf-8",
         ) as testfile:
             parser = ReversinglabsSpectraassureParser()
-            findings = parser.get_findings(
-                testfile,
-                Test(),
-            )
+            findings = parser.get_findings(testfile, Test())
+
             self.assertEqual(1, len(findings))
             for finding in findings:
                 self.common_checks(finding)
                 self.assertEqual(1, len(finding.unsaved_vulnerability_ids))
 
     def test_parse_file_with_many_vulns(self) -> None:
+        # --------------------------------------
         with (get_unit_tests_scans_path(_WHERE) / "HxDSetup_2.5.0.exe-report.rl.json").open(
             encoding="utf-8",
         ) as testfile:
             parser = ReversinglabsSpectraassureParser()
-            findings = parser.get_findings(
-                testfile,
-                Test(),
-            )
+            findings = parser.get_findings(testfile, Test())
+
             self.assertEqual(12, len(findings))
             for finding in findings:
                 self.common_checks(finding)

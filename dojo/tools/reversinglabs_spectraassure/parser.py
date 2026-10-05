@@ -1,6 +1,5 @@
 # noqa: RUF100
 import hashlib
-import json
 import logging
 from typing import Any
 
@@ -50,10 +49,12 @@ class ReversinglabsSpectraassureParser:
         if node.cvss_version == 4:
             cvssv4_score = node.score or None
 
+        description = f"#{node.title}\n\n{node.description}"
+
         finding = Finding(
             date=node.scan_date,
             title=node.title,
-            description=node.title + " " + node.description + "\n",
+            description=description,
             cve=node.cve,
             cvssv3_score=cvssv3_score,
             cvssv4_score=cvssv4_score,
@@ -108,29 +109,32 @@ class ReversinglabsSpectraassureParser:
         try:
             info = RlJsonInfo(file_handle=file)
             info.build_findings()
-
-            for cve_info_node_instance in info.get_results_list():
-                finding = self._one_finding(
-                    node=cve_info_node_instance,
-                    test=test,
-                )
-                if finding is None:
-                    continue
-
-                key = finding.hash_code
-                if key not in self._duplicates:
-                    self._findings.append(finding)
-                    self._duplicates[key] = finding
-                    continue
-
-                dup = self._duplicates[key]
-                if dup:
-                    dup.description += finding.description
-                    dup.nb_occurences += 1
-
-        except (json.JSONDecodeError, KeyError, ValueError, TypeError) as e:
+            nodes = list(info.get_results_list())
+        except (ValueError, KeyError, TypeError) as e:
             msg = f"Not a valid Spectra Assure rl.json report: {e}"
             raise ValueError(msg) from e
+
+        for node in nodes:
+            finding = self._one_finding(
+                node=node,
+                test=test,
+            )
+            if finding is None:
+                continue
+
+            key = finding.hash_code
+            if not key:
+                continue
+
+            if key not in self._duplicates:
+                self._findings.append(finding)
+                self._duplicates[key] = finding
+                continue
+
+            dup = self._duplicates[key]
+            if dup:
+                dup.description += finding.description
+                dup.nb_occurences += 1
 
         return self._findings
 
