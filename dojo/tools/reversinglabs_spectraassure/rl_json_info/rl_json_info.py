@@ -760,7 +760,8 @@ class RlJsonInfo:
 
             cve_info_node_instance = self._make_simple_node(item)
             cve_info_node_instance.description = self._make_simple_description(
-                item, category,
+                item,
+                category,
             )  # now add the secrets info
             if len(secret_as_text):
                 cve_info_node_instance.description += f"\n```\n{secret_as_text}\n```"
@@ -781,7 +782,8 @@ class RlJsonInfo:
             logger.debug("violations_by_category: %s %s", category, item)
             cve_info_node_instance = self._make_simple_node(item)
             cve_info_node_instance.description = self._make_simple_description(
-                item, category,
+                item,
+                category,
             )  # now add the secrets info
 
             self._add_to_results(
