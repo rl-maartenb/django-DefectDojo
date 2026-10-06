@@ -3,6 +3,14 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+SHORT_SHA256 = 8
+
+
+def sha256_tag(sha256: str | None) -> str:
+    # Titles carry a short sha256: one component name can stand for several different binaries
+    # (HxD ships a build per language, all at the same path), which would otherwise be identical rows.
+    return f"(sha256 {sha256[:SHORT_SHA256]})" if sha256 else ""
+
 
 class CveInfoNode:
 
@@ -28,19 +36,13 @@ class CveInfoNode:
         self.dep_uuid: str | None = None
         self.impact: str = ""
 
-        self.original_file_sha256: str = ""
-        # self.original_file: str = ""
-
         self.scan_date: datetime.date = datetime.datetime.now(tz=datetime.UTC).date()
-        # self.scan_tool: str = ""
-        # self.scan_tool_version: str = ""
 
         self.cvss_version: int = 0
         self.score: float | None = None  # this is normally the v3 score, we have no v4 in the report yet
         self.score_severity: str = "Info"  # score mapped to severity
 
         self.tags: list[str] = []
-        # self.unique_id_from_tool: str = ""
         self.known_exploited: bool = False
 
     def __str__(self) -> str:
@@ -54,7 +56,7 @@ class CveInfoNode:
 
         tt: list[str] = [
             f"{cve}",
-            f"on {self.component_type}: ",
+            f"on {self.component_type}:",  # no trailing space: the parts are joined with ' '
         ]
 
         purl = self.component_purl
@@ -70,6 +72,10 @@ class CveInfoNode:
                     f"version {self.component_version}",
                 ],
             )
+
+        tag = sha256_tag(self.component_file_sha256)
+        if tag:
+            tt.append(tag)
 
         self.title = " ".join(tt)
         return self.title

@@ -17,7 +17,6 @@ Requires Python 3.13+.
 """
 
 import json
-import logging
 from collections import defaultdict
 from typing import Any, TypedDict
 
@@ -25,8 +24,6 @@ type Json = dict[str, Any]
 
 FAIL = "fail"
 SECRETS = "secrets"
-
-logger = logging.getLogger(__name__)
 
 
 class EvidenceInfo(TypedDict):
@@ -207,6 +204,10 @@ if __name__ == "__main__":
     import sys
     from pathlib import Path
 
+    if len(sys.argv) != 2:
+        sys.stderr.write(f"usage: {sys.argv[0]} <report.rl.json>\n")
+        raise SystemExit(2)
+
     with Path(sys.argv[1]).open(encoding="utf-8") as handle:
         metadata = json.load(handle)["report"]["metadata"]
 
@@ -216,4 +217,6 @@ if __name__ == "__main__":
         secrets=metadata.pop("secrets", None),
     )
     del metadata
-    logger.info(str(extractor.to_json()))
+
+    # sys.stdout.write, not print(): upstream's ruff config selects T20, which forbids print
+    sys.stdout.write(extractor.to_json() + "\n")

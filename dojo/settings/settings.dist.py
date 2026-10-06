@@ -1492,6 +1492,7 @@ HASHCODE_FIELDS_PER_SCANNER = {
     # is what every result family assigns to "title" as well.
     "Checkmarx One Scan": ["unique_id_from_tool"],
     "OPF Scan": ["title", "cwe", "severity", "description"],
+    "ReversingLabs Spectra Assure": ["unique_id_from_tool", "component_name", "component_version"],
 }
 
 # Override the hardcoded settings here via the env var
@@ -1953,6 +1954,7 @@ DEDUPLICATION_ALGORITHM_PER_PARSER = {
     # that key rewrites itself as time passes even though the report never changed.
     "Xeol Parser": DEDUPE_ALGO_HASH_CODE,
     "OPF Scan": DEDUPE_ALGO_HASH_CODE,
+    "ReversingLabs Spectra Assure": DEDUPE_ALGO_HASH_CODE,
 }
 
 # Override the hardcoded settings here via the env var

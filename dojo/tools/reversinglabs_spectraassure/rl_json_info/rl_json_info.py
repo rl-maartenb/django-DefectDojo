@@ -6,7 +6,7 @@ from typing import Any, ClassVar
 
 from packageurl import PackageURL
 
-from .cve_info_node import CveInfoNode
+from .cve_info_node import CveInfoNode, sha256_tag
 from .rl_json_secrets import (
     ComponentInfo,
     SecretInfo,
@@ -21,27 +21,15 @@ logger = logging.getLogger(__name__)
 class RlJsonInfo:
     info: dict[str, Any]
 
-    # we currently only use components, dependencies and vulnerabilities
+    # the metadata subtrees the parser reads; the others (assessments, cryptography,
+    # indicators, licenses, ml_models, services) are never looked at
     known_metadata_sub_keys: ClassVar[list[str]] = [
-        # "assessments",
-        # "cryptography",
-        # "indicators",
-        # "licenses",
-        # "ml_models",
-        # "services",
         "components",
         "dependencies",
         "secrets",
         "violations",
         "vulnerabilities",
     ]
-
-    # assessments: dict[str, Any]
-    # cryptography: dict[str, Any]
-    # indicators: dict[str, Any]
-    # licenses: dict[str, Any]
-    # ml_models: dict[str, Any]
-    # services: dict[str, Any]
 
     components: dict[str, Any]
     dependencies: dict[str, Any]
@@ -58,6 +46,7 @@ class RlJsonInfo:
         5: "Critical",
     }
 
+    # UNPROVEN ("CVE Discovered" in the Portal) is deliberately not turned into a tag or an impact line
     ignored_exploit_keys: ClassVar[set[str]] = {"UNPROVEN"}
 
     common_tags_map: ClassVar[dict[str, str]] = {
@@ -65,13 +54,12 @@ class RlJsonInfo:
         "EXISTS": "Exploit Exists",
         "MALWARE": "Exploited by Malware",
         "MANDATE": "Patching Mandated",
-        # "UNPROVEN": "CVE Discovered",
     }
 
     # sort order, to align with Spectra Assure Portal
     # 1: Fix Available
     # 2: Exploit exists
-    # 3: Exploited my malware
+    # 3: Exploited by malware
     # 4: Patch mandated
 
     impact_sort_order: ClassVar[list[str]] = [
@@ -79,12 +67,11 @@ class RlJsonInfo:
         "Exploit Exists",
         "Exploited by Malware",
         "Patching Mandated",  # if present also set known_exploited to True
-        # "CVE Discovered",
     ]
 
-    # dict:cve, comp_uuid, dep_uuid | None -> CveInfoNode
-    # for cve on components we get the info with path: cve.comp_uuid.None
-    # for cve on dependency on component we het the info with path: cve.dep_uuid.comp_uuid
+    # _results[key][comp_uuid][dep_uuid] -> CveInfoNode
+    #   key:      the CVE id for vulnerabilities, <category>-<rule_id> for policy violations
+    #   dep_uuid: None for a CVE on the component itself, and for violations
     _results: dict[str | None, dict[str, dict[str | None, CveInfoNode]]]
 
     def __init__(
@@ -96,14 +83,32 @@ class RlJsonInfo:
         self.info = {}
 
         self.data: dict[str, Any] = json.load(file_handle)
-        k = "timestamp"
-        if k in self.data:
-            self.scan_date = datetime.datetime.fromisoformat(self.data[k]).date()
 
         self._results = {}
         self._get_info()
         self._get_meta()
+        self._get_scan_date()  # after _get_meta(), so a non report file reports the missing 'report' key first
         self.data = {}
+
+    def _get_scan_date(
+        self,
+    ) -> None:
+        logger.debug("_get_scan_date")
+
+        # scan_date has no sensible default: a finding dated 'today' because the report
+        # carried no timestamp would be silently wrong, so refuse the file instead.
+
+        k = "timestamp"
+        ts = self.data.get(k, None)
+        if not ts:
+            msg = f"Missing '{k}' key in the json data, this is not a 'report.rl.json' type file"
+            raise ValueError(msg)
+
+        try:
+            self.scan_date = datetime.datetime.fromisoformat(str(ts)).date()
+        except ValueError as e:
+            msg = f"Invalid '{k}' value in the json data: {ts!r}"
+            raise ValueError(msg) from e
 
     def _get_info(
         self,
@@ -137,19 +142,6 @@ class RlJsonInfo:
         # ----------------------
         for name in self.known_metadata_sub_keys:
             setattr(self, name, metadata.pop(name, None) or {})
-
-    def _find_sha256_in_components(
-        self,
-        sha256: str,
-    ) -> bool:
-        logger.debug("_find_sha256_in_components")
-
-        for component in self.components.values():
-            comp_sha256 = self._get_sha256(data=component)
-            if comp_sha256 == sha256:
-                return True
-
-        return False
 
     def _add_to_results(
         self,
@@ -333,15 +325,8 @@ class RlJsonInfo:
         cve_info_node_instance.dep_uuid = dep_uuid
         cve_info_node_instance.active = bool(active)
 
-        f_info: dict[str, Any] = self.info.get("file", None) or {}
-
-        original_file = str(f_info.get("name", ""))
-        file_sha256 = self._get_sha256(f_info)
-        if not file_sha256:
-            msg = f"missing sha256 for file: '{original_file}'"
-            raise ValueError(msg)
-
-        # cve_info_node_instance.original_file_sha256 = file_sha256
+        # report.info.file is not needed to build a finding: a report without it, or without
+        # its sha256, still yields every finding. It used to abort the whole import here.
         cve_info_node_instance.scan_date = self.scan_date
 
         # score related
@@ -516,14 +501,6 @@ class RlJsonInfo:
         cve_info_node_instance.make_description_cin(purl=d_purl, summary=summary)
         cve_info_node_instance.vuln_id_from_tool = cve
 
-        # dep_purl = dependency.get("purl", "")
-        # dep_name = dependency.get("product", "")
-        # dep_version = dependency.get("version", "")
-        # if we have a dependency purl then purl, otherwise component product + version
-        # tail = dep_purl
-        # if len(tail) == 0:
-        #     tail = f"{dep_name}@{dep_version}"
-
         logger.debug("%s", cve_info_node_instance)
         return cve_info_node_instance
 
@@ -658,6 +635,11 @@ class RlJsonInfo:
             f"({data['category']})",
             f"on {data['name']}",
         ]
+
+        tag = sha256_tag(data.get("comp_sha256"))
+        if tag:
+            rr.append(tag)
+
         return " ".join(rr)
 
     def _make_simple_description(self, data: dict[str, Any], category: str | None = None) -> str:
@@ -678,13 +660,6 @@ class RlJsonInfo:
         cve_info_node_instance.active = True
 
         my_id = f"{data['category']}-{data['rule_id']}"
-        f_info: dict[str, Any] = self.info.get("file", {})
-        original_file = str(f_info.get("name", ""))
-
-        file_sha256 = self._get_sha256(f_info)
-        if not file_sha256:  # we must have a file sha, refuse to continue
-            msg = f"Missing sha256 for the file: {original_file}"
-            raise ValueError(msg)
 
         cve_info_node_instance.scan_date = self.scan_date
 
@@ -732,8 +707,6 @@ class RlJsonInfo:
                 lines.append(line)
 
         return "\n".join(lines)
-
-        # return json.dumps(secrets, indent=4)
 
     def _collect_violations_by_category_secrets(self) -> None:
         logger.debug("_collect_violations_by_category_secrets")
@@ -795,14 +768,11 @@ class RlJsonInfo:
 
     def _get_cve_active_all(self) -> None:
         """
-        0: verify that the info -> file sha256 comes back as a component,
-           so we can forget about it as it will be processed as a component
         A: walk over components with active vulnerabilities
         B: walk over components -> dependencies with active vulnerabilities
         """
         logger.debug("_get_cve_active_all")
 
-        # self.file_is_component = self._verify_file_is_also_component()
         self._get_all_active_cve_on_components_without_dependencies()
         self._get_all_active_cve_on_components_with_dependencies()
 
