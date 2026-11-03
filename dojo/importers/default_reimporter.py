@@ -15,8 +15,9 @@ from dojo.finding.deduplication import (
     find_candidates_for_deduplication_uid_or_hash,
     find_candidates_for_deduplication_unique_id,
     find_candidates_for_reimport_legacy,
+    locations_covered,
 )
-from dojo.importers.base_importer import BaseImporter, Parser
+from dojo.importers.base_importer import BaseImporter, Parser, reports_a_deleted_target
 from dojo.importers.base_location_manager import LocationHandler
 from dojo.importers.options import ImporterOptions
 from dojo.jira import services as jira_services
@@ -90,7 +91,9 @@ class DefaultReImporter(BaseImporter, DefaultReImporterOptions):
             **kwargs,
         )
         self.location_handler = LocationHandler(self.test.engagement.product)
+        self.location_handler.set_test(self.test)
 
+    @reports_a_deleted_target
     def process_scan(
         self,
         scan: TemporaryUploadedFile,
@@ -116,6 +119,9 @@ class DefaultReImporter(BaseImporter, DefaultReImporterOptions):
         # Get the findings from the parser based on what methods the parser supplies
         # This could either mean traditional file parsing, or API pull parsing
         parsed_findings = self.parse_findings(scan, parser) or []
+        # The excess-duplicate delete leaves the duplicates of a test being imported alone; this
+        # one is about to have its findings matched and written, so say so before the first match.
+        self.lock_test_under_import(self.test)
         (
             new_findings,
             reactivated_findings,
@@ -395,6 +401,13 @@ class DefaultReImporter(BaseImporter, DefaultReImporterOptions):
             if self.service is not None:
                 sanitized.service = self.service
             self.location_handler.clean_unsaved(sanitized)
+            # Drop non-string vulnerability ids before hashing so reimport hashes the
+            # same sanitized list the importer does (the importer sanitizes via
+            # process_cve before computing the hash). Otherwise a non-string id is
+            # str()-ed into the reimport hash only (Finding.get_vulnerability_ids), which
+            # produces a duplicate finding on every reimport for scanners that hash on
+            # vulnerability_ids.
+            self.sanitize_vulnerability_ids(sanitized)
             # Calculate the hash code to be used to identify duplicates
             sanitized.hash_code = self.calculate_unsaved_finding_hash_code(sanitized)
             deduplicationLogger.debug(f"unsaved finding's hash_code: {sanitized.hash_code}")
@@ -456,6 +469,7 @@ class DefaultReImporter(BaseImporter, DefaultReImporterOptions):
                     candidates_by_uid=candidates_by_uid,
                     candidates_by_key=candidates_by_key,
                 )
+                matched_findings = self.order_reimport_candidates(unsaved_finding, matched_findings)
                 deduplicationLogger.debug(f"found {len(matched_findings)} findings matching with current new finding")
                 # Determine how to proceed based on whether matches were found or not
                 if matched_findings:
@@ -927,6 +941,58 @@ class DefaultReImporter(BaseImporter, DefaultReImporterOptions):
         logger.debug("REIMPORT_SCAN parser v2: Create parse findings")
         return super().parse_findings_dynamic_test_type(scan, parser)
 
+    @staticmethod
+    def _carries_suppression_of(unsaved_finding: Finding, existing_finding: Finding) -> bool:
+        """Whether the incoming finding reports the same false-positive / out-of-scope / risk-accepted state."""
+        return (
+            (existing_finding.false_p and unsaved_finding.false_p)
+            or (existing_finding.out_of_scope and unsaved_finding.out_of_scope)
+            or (existing_finding.risk_accepted and unsaved_finding.risk_accepted)
+        )
+
+    def order_reimport_candidates(
+        self,
+        unsaved_finding: Finding,
+        matched_findings: list[Finding],
+    ) -> list[Finding]:
+        """
+        Filter and order the findings that share a matching key with an incoming finding, by where it was reported.
+
+        Matching keys often leave the location out (many network scanners hash only title,
+        severity and vulnerability ids), so the same issue reported on several hosts shares one key.
+        Taking the first candidate then folds every host into whichever finding has the lowest id:
+
+        * A false-positive, out-of-scope or risk-accepted candidate is skipped when it does not
+          already cover every location the incoming finding reports, unless the incoming finding
+          carries the same status. Matching into it would put a newly reported host under a
+          decision someone made about other hosts, and that host's issue would never be shown.
+          With no candidate left, the incoming finding is created as a new finding.
+        * Among the rest, a candidate that already covers the incoming locations comes first, so
+          each host's finding keeps matching itself. The order is otherwise unchanged.
+
+        Findings that report no location are returned as they are.
+        """
+        if not matched_findings:
+            return matched_findings
+        if not (getattr(unsaved_finding, "unsaved_locations", None) or getattr(unsaved_finding, "unsaved_endpoints", None)):
+            return matched_findings
+        covered = {id(candidate): locations_covered(unsaved_finding, candidate) for candidate in matched_findings}
+        kept = [
+            candidate
+            for candidate in matched_findings
+            if covered[id(candidate)]
+            or not (candidate.false_p or candidate.out_of_scope or candidate.risk_accepted)
+            or self._carries_suppression_of(unsaved_finding, candidate)
+        ]
+        if len(kept) < len(matched_findings):
+            deduplicationLogger.debug(
+                "reimport: skipped %d suppressed candidate(s) that do not cover the locations of incoming finding %s",
+                len(matched_findings) - len(kept),
+                unsaved_finding.title,
+            )
+        # Stable sort: covering candidates first, original order otherwise.
+        return sorted(kept, key=lambda candidate: not covered[id(candidate)])
+
     def match_finding_to_candidate_reimport(
         self,
         unsaved_finding: Finding,
@@ -1176,7 +1242,8 @@ class DefaultReImporter(BaseImporter, DefaultReImporterOptions):
             # restart the sla start date to the current date, finding.save() will set new sla_expiration_date
             existing_finding.sla_start_date = self.now
         # don't dedupe before endpoints/locations are added, postprocessing will be done on next save (in calling method)
-        existing_finding.save_no_options()
+        if not self.save_matched_finding(existing_finding, no_options=True):
+            return existing_finding, True
 
         if existing_finding.duplicate:
             note_entry = f"Un-mitigated by {self.scan_type} re-upload but kept inactive because the finding is a duplicate."
@@ -1228,7 +1295,8 @@ class DefaultReImporter(BaseImporter, DefaultReImporterOptions):
                 if self.verified is not None:
                     existing_finding.verified = self.verified
                 existing_finding = self.process_cve(existing_finding)
-                existing_finding.save_no_options()
+                if not self.save_matched_finding(existing_finding, no_options=True):
+                    return existing_finding, True
                 existing_finding.notes.create(
                     author=self.user,
                     entry=f"Mitigated by {self.test.test_type} re-upload.",
@@ -1248,7 +1316,8 @@ class DefaultReImporter(BaseImporter, DefaultReImporterOptions):
                 if self.verified is not None:
                     existing_finding.verified = self.verified
                 existing_finding = self.process_cve(existing_finding)
-                existing_finding.save_no_options()
+                if not self.save_matched_finding(existing_finding, no_options=True):
+                    return existing_finding, True
                 existing_finding.notes.create(
                     author=self.user,
                     entry=f"Mitigated by {self.test.test_type} re-upload.",
@@ -1266,7 +1335,8 @@ class DefaultReImporter(BaseImporter, DefaultReImporterOptions):
         ):
             existing_finding.component_name = existing_finding.component_name or component_name
             existing_finding.component_version = existing_finding.component_version or component_version
-            existing_finding.save_no_options()
+            if not self.save_matched_finding(existing_finding, no_options=True):
+                return existing_finding, True
         # Return False here to make sure further processing happens
         return existing_finding, False
 
@@ -1361,8 +1431,12 @@ class DefaultReImporter(BaseImporter, DefaultReImporterOptions):
         Accumulates changes into pending_vuln_id_deletes / pending_vulnerability_ids
         for batch flush at the batch boundary via flush_vulnerability_ids().
         """
+        # A non-string vulnerability id (e.g. a dict nested under "vulnerability_ids"
+        # in a Generic Findings Import report) is unhashable for dict.fromkeys and has
+        # no .strip(); drop such entries first so reimport does not 500 on the same
+        # input the importer already tolerates.
+        self.sanitize_vulnerability_ids(finding)
         vulnerability_ids_to_process = list(dict.fromkeys(finding.unsaved_vulnerability_ids or []))
-        vulnerability_ids_to_process = [x for x in vulnerability_ids_to_process if x.strip()]
 
         # Reconcile CWEs independently of the vulnerability_ids early-exit below (CWEs may change
         # while vulnerability_ids do not, and vice versa).
@@ -1450,7 +1524,7 @@ class DefaultReImporter(BaseImporter, DefaultReImporterOptions):
         # update, and saving here would insert it early -- defeating the buffering and splitting
         # one batched INSERT into per-finding ones. The value rides along when the buffer flushes.
         if finding.cve != old_cve and finding.pk:
-            finding.save()
+            self.save_matched_finding(finding)
         return finding
 
     def process_groups_for_all_findings(
@@ -1461,14 +1535,13 @@ class DefaultReImporter(BaseImporter, DefaultReImporterOptions):
         Add findings to a group that may or may not exist, based upon the users
         selection at import time
         """
-        for (group_name, findings) in self.group_names_to_findings_dict.items():
-            finding_helper.add_findings_to_auto_group(
-                group_name,
-                findings,
-                self.group_by,
-                create_finding_groups_for_all_findings=self.create_finding_groups_for_all_findings,
-                **kwargs,
-            )
+        finding_helper.add_findings_to_auto_groups(
+            self.group_names_to_findings_dict,
+            self.group_by,
+            create_finding_groups_for_all_findings=self.create_finding_groups_for_all_findings,
+            **kwargs,
+        )
+        for findings in self.group_names_to_findings_dict.values():
             # We dont check if the finding jira sync is applicable quite yet until we can get in the loop
             # but this is a way to at least make it that far
             if self.push_to_jira or getattr(self.jira_instance, "finding_jira_sync", False):

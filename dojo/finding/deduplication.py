@@ -219,6 +219,20 @@ def is_duplicate_reopen(new_finding, existing_finding) -> bool:
     return finding_mitigated(existing_finding) and finding_not_human_set_status(existing_finding) and not finding_mitigated(new_finding)
 
 
+def manual_duplicate_hides_open_finding(duplicate, original) -> bool:
+    """
+    Whether marking ``duplicate`` as a duplicate of ``original`` by hand would hide an open finding.
+
+    A duplicate is inactive, and a mitigated original is not shown in any active view either, so a
+    finding that is still open would disappear entirely. Automatic deduplication already refuses
+    this case (``is_duplicate_reopen``, PR 9558); the manual paths (mark as duplicate, set as
+    original) apply the same rule. ``original`` is resolved to the root of its cluster first,
+    because that is the finding ``duplicate`` would end up pointing at.
+    """
+    root = original.duplicate_finding if original.duplicate and original.duplicate_finding else original
+    return is_duplicate_reopen(duplicate, root)
+
+
 def finding_mitigated(finding: Finding) -> bool:
     return finding.active is False and (finding.is_mitigated is True or finding.mitigated is not None)
 
@@ -356,6 +370,32 @@ def are_locations_duplicates(new_finding, to_duplicate_finding):
 
     deduplicationLogger.debug(f"endpoints are not duplicates: {new_finding.id} and {to_duplicate_finding.id}")
     return False
+
+
+def _comparable_locations(finding):
+    """A finding's URL locations (or legacy endpoints) and the equality check that compares them."""
+    if locations_enabled():
+        urls = finding_locations(finding.locations.all()) if finding.pk else unsaved_url_locations(finding)
+        return urls, are_location_urls_equal
+    endpoints = finding.endpoints.all() if finding.pk else getattr(finding, "unsaved_endpoints", [])
+    return get_endpoints_as_url(endpoints), are_urls_equal
+
+
+def locations_covered(new_finding, existing_finding) -> bool:
+    """
+    Whether every location ``new_finding`` reports is already on ``existing_finding``.
+
+    Compared on ``DEDUPE_ALGO_ENDPOINT_FIELDS``, like ``are_locations_duplicates``. A finding that
+    reports no location, or deduplication with endpoint comparison switched off, counts as covered.
+    """
+    fields = settings.DEDUPE_ALGO_ENDPOINT_FIELDS
+    if not fields:
+        return True
+    new_urls, equal = _comparable_locations(new_finding)
+    if not new_urls:
+        return True
+    existing_urls, _ = _comparable_locations(existing_finding)
+    return all(any(equal(new, old, fields) for old in existing_urls) for new in new_urls)
 
 
 def build_candidate_scope_queryset(test, mode="deduplication", service=None, *, candidate_qs=None):
@@ -1044,16 +1084,23 @@ def match_batch_of_findings(findings, *, candidate_qs=None, ordering_key=None):
 # ---------------------------------------------------------------------------
 # Batch dedup functions (match + persist)
 # These call the match-only functions above and then persist the results.
+#
+# ``mark_duplicate`` is what each loop calls once it has decided on a match. It defaults to
+# set_duplicate and takes the same arguments. A caller may pass its own to handle some matches
+# differently (for example, to keep both findings active): return the list of findings it modified
+# (an empty list when it modified none) and the loop stops looking for a match for that finding, or
+# raise and the loop tries the next candidate, exactly as with set_duplicate.
 # ---------------------------------------------------------------------------
 
 
-def _dedupe_batch_hash_code(findings, *, candidate_qs=None, ordering_key=None):
+def _dedupe_batch_hash_code(findings, *, candidate_qs=None, ordering_key=None, mark_duplicate=None):
     # NOTE: These functions intentionally interleave matching and set_duplicate()
     # rather than calling the match_batch_*() functions above. This is because
     # set_duplicate() modifies finding.duplicate in-memory, which affects the
     # duplicate check in subsequent loop iterations (especially for uid_or_hash).
     if not findings:
         return []
+    mark_duplicate = mark_duplicate or set_duplicate
     test = findings[0].test
     candidates_by_hash = find_candidates_for_deduplication_hash(test, findings, candidate_qs=candidate_qs)
     if not candidates_by_hash:
@@ -1063,16 +1110,17 @@ def _dedupe_batch_hash_code(findings, *, candidate_qs=None, ordering_key=None):
         deduplicationLogger.debug(f"deduplication start for finding {new_finding.id} with DEDUPE_ALGO_HASH_CODE")
         for match in get_matches_from_hash_candidates(new_finding, candidates_by_hash, ordering_key=ordering_key):
             try:
-                modified_new_findings.extend(set_duplicate(new_finding, match, save=False))
+                modified_new_findings.extend(mark_duplicate(new_finding, match, save=False))
                 break
             except Exception as e:
                 deduplicationLogger.debug(str(e))
     return _flush_duplicate_changes(modified_new_findings)
 
 
-def _dedupe_batch_unique_id(findings, *, candidate_qs=None, ordering_key=None):
+def _dedupe_batch_unique_id(findings, *, candidate_qs=None, ordering_key=None, mark_duplicate=None):
     if not findings:
         return []
+    mark_duplicate = mark_duplicate or set_duplicate
     test = findings[0].test
     candidates_by_uid = find_candidates_for_deduplication_unique_id(test, findings, candidate_qs=candidate_qs)
     if not candidates_by_uid:
@@ -1083,7 +1131,7 @@ def _dedupe_batch_unique_id(findings, *, candidate_qs=None, ordering_key=None):
         for match in get_matches_from_unique_id_candidates(new_finding, candidates_by_uid, ordering_key=ordering_key):
             deduplicationLogger.debug(f"Trying to deduplicate finding {new_finding.id} against candidate {match.id}")
             try:
-                modified_new_findings.extend(set_duplicate(new_finding, match, save=False))
+                modified_new_findings.extend(mark_duplicate(new_finding, match, save=False))
                 deduplicationLogger.debug(f"Successfully deduplicated finding {new_finding.id} against candidate {match.id}")
                 break
             except Exception as e:
@@ -1091,9 +1139,10 @@ def _dedupe_batch_unique_id(findings, *, candidate_qs=None, ordering_key=None):
     return _flush_duplicate_changes(modified_new_findings)
 
 
-def _dedupe_batch_uid_or_hash(findings, *, candidate_qs=None, ordering_key=None):
+def _dedupe_batch_uid_or_hash(findings, *, candidate_qs=None, ordering_key=None, mark_duplicate=None):
     if not findings:
         return []
+    mark_duplicate = mark_duplicate or set_duplicate
 
     test = findings[0].test
     candidates_by_uid, existing_by_hash = find_candidates_for_deduplication_uid_or_hash(test, findings, candidate_qs=candidate_qs)
@@ -1107,16 +1156,17 @@ def _dedupe_batch_uid_or_hash(findings, *, candidate_qs=None, ordering_key=None)
 
         for match in get_matches_from_uid_or_hash_candidates(new_finding, candidates_by_uid, existing_by_hash, ordering_key=ordering_key):
             try:
-                modified_new_findings.extend(set_duplicate(new_finding, match, save=False))
+                modified_new_findings.extend(mark_duplicate(new_finding, match, save=False))
                 break
             except Exception as e:
                 deduplicationLogger.debug(str(e))
     return _flush_duplicate_changes(modified_new_findings)
 
 
-def _dedupe_batch_legacy(findings, *, candidate_qs=None, ordering_key=None):
+def _dedupe_batch_legacy(findings, *, candidate_qs=None, ordering_key=None, mark_duplicate=None):
     if not findings:
         return []
+    mark_duplicate = mark_duplicate or set_duplicate
     test = findings[0].test
     candidates_by_title, candidates_by_cwe = find_candidates_for_deduplication_legacy(test, findings, candidate_qs=candidate_qs)
     if not (candidates_by_title or candidates_by_cwe):
@@ -1126,7 +1176,7 @@ def _dedupe_batch_legacy(findings, *, candidate_qs=None, ordering_key=None):
         deduplicationLogger.debug(f"deduplication start for finding {new_finding.id} with DEDUPE_ALGO_LEGACY")
         for match in get_matches_from_legacy_candidates(new_finding, candidates_by_title, candidates_by_cwe, ordering_key=ordering_key):
             try:
-                modified_new_findings.extend(set_duplicate(new_finding, match, save=False))
+                modified_new_findings.extend(mark_duplicate(new_finding, match, save=False))
                 break
             except Exception as e:
                 deduplicationLogger.debug(str(e))

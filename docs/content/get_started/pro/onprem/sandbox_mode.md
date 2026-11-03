@@ -28,7 +28,7 @@ DefectDojo's database user needs two attributes to create the sandbox:
 * `CREATEROLE`, to create the sandbox's two login roles;
 * `CREATEDB`, so the sandbox's admin role can create and reset the sandbox databases.
 
-The database user of a new Docker Compose installation with the bundled database has both. On a managed database (Amazon RDS, Google Cloud SQL, Azure Database for PostgreSQL), the administrator user the provider creates has both; a user created with SQL may not. To check, connect as DefectDojo's database user and run:
+The database user of a new Docker Compose installation with the bundled database has both. The Helm chart's bundled PostgreSQL gives DefectDojo's user `CREATEDB` only, so with the chart's bundled database the sandbox is provisioned through `sandbox.provisionUrl`, a connection URL for a role that has both, such as the bundled PostgreSQL's superuser (see below). If your chart version does not set it for you, set it yourself. On a managed database (Amazon RDS, Google Cloud SQL, Azure Database for PostgreSQL), the administrator user the provider creates has both; a user created with SQL may not. To check, connect as DefectDojo's database user and run:
 
 ```sql
 SELECT rolcreaterole, rolcreatedb FROM pg_roles WHERE rolname = current_user;
@@ -41,6 +41,8 @@ ALTER ROLE <DefectDojo database user> CREATEROLE CREATEDB;
 ```
 
 or set `DD_SANDBOX_PROVISION_URL` (Helm: `sandbox.provisionUrl`) to a connection URL for a role that has them. DefectDojo then creates the sandbox with that role and uses its own user for everything else.
+
+With [passwordless database authentication](/get_started/pro/onprem/passwordless_database/), each sandbox role signs in with a cloud identity of its own instead of a derived password. On AWS the requirements above still apply. On Azure and Google Cloud an administrator creates the two sandbox roles for their identities, so DefectDojo's user needs neither `CREATEROLE` nor `CREATEDB`. See [Sandbox](/get_started/pro/onprem/passwordless_database/#sandbox) for what to set up on each cloud.
 
 ## What it creates
 

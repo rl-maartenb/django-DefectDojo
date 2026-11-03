@@ -26,6 +26,8 @@ Overall, Findings are designed to work with the Asset Hierarchy to standardize y
 ## Accessing Findings 
 Findings are accessible from the sidebar under **Act > Explore > Findings**. The submenu provides access to **Active** and **Mitigated** Findings, **All** Findings (regardless of Open or Closed status), Finding **Groups**, **Risk Accepted** Findings and Finding **Templates**; new Findings are created with the **New Finding** button at the top of a Findings list. Individual Findings are also accessible from within the Test that contains them. 
 
+Through the API, `/api/v2/findings/?engagement=<id>` lists the Findings of one Engagement, `?product=<id>` those of one Asset and `?prod_type=<id>` those of one Organization. Each takes a comma-separated list of ids and combines with every other filter. The longer `test__engagement`, `test__engagement__product` and `test__engagement__product__prod_type` names do the same.
+
 [Risk Accepted Findings](/triage_findings/findings_workflows/os__risk_acceptance/) are listed under **Act > Explore > Findings > Risk Accepted**; the Risk Acceptance records themselves are managed from **Act > Risk Acceptances** in the sidebar. 
 
 ![image](images/profindings_ss1.png)
@@ -103,7 +105,7 @@ Findings require the following metadata:
 
 In addition to metadata corresponding to the tables in a Finding’s view, optional metadata fields include: 
 - **Tags**: Any tags that have been added to the Finding.
-- **Owners**: The group of users that will be responsible for the selected Finding.
+- **Owners**: The group of users that will be responsible for the selected Finding. The Findings list shows it in the **Owner (Team)** column, hidden by default, with a filter that lists the groups you can view. Through the API, `/api/v2/findings/?owners=<group id>` filters by the same group, and `?assignee=<user id>` or `?is_assigned=false` by individual assignees (`is_assigned` takes `true` or `false`; any other value is ignored).
 - **Push to Jira**: Pushes the Finding to Jira for ticketing purposes. 
 - **Push to Connector**: Pushes the Finding to the issue tracker assigned to its Asset or Engagement through a [Downstream Connector](/connectors/downstream/about/). When no Issue Tracker Assignment covers either, nothing is sent and DefectDojo says so.
 - **Risk and priority settings**: Offers the option to override DefectDojo’s automatic calculation of the Finding’s risk and priority. 
@@ -282,6 +284,8 @@ More information about DefectDojo’s Report Builder can be found [here](/metric
 Pages that show a list of Findings or a list of Engagements have a CSV and Excel export option at the top left. For Findings, there is also the option to perform a **Quick Export**.
 
 The CSV and Excel export dialog lets you choose which fields to include and which field to sort by. Findings exports can include **Priority**, **Risk** and **Risk Score**, the same values shown in the Findings table. **Export From Table Preference** selects them when the Risk and Priority columns are visible in the table, and carries a Risk or Priority sort from the table into the export. Risk is exported as its label (for example, Needs Action), so sort by Risk Score to order an export by risk.
+
+Findings exports can also name the systems each Finding affects. With Locations enabled, select the **Locations** field: each row lists the values of the Finding's Locations, and you only see Locations you have permission to view. (On instances still using Endpoints, the equivalent field is **Endpoints**.) The Locations column of a report template's Findings table carries the same values, so a scheduled or templated report can pair each Finding with its affected hosts.
 
 Selecting Quick Export opens a dialog with three choices:
 
